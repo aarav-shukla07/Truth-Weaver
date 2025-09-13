@@ -1,0 +1,49 @@
+{
+  "shadow_id": "phoenix_2024",
+  "revealed_truth": {
+    "programming_experience": "N years",
+    "programming_language": null,
+    "skill_mastery": "intermediate",
+    "leadership_claims": "uncertain",
+    "team_experience": "individual contributor",
+    "skills and other keywords": [
+      "kubernetes",
+      "devops"
+    ]
+  },
+  "deception_patterns": [
+    {
+      "lie_type": "fabricated",
+      "contradictory_claims": [
+        "I'm a DevOps engineer",
+        "I'm not a DevOps engineer"
+      ],
+      "sessions": [
+        1,
+        5
+      ],
+      "confidence": 0.8
+    }
+  ],
+  "field_confidence": {
+    "programming_experience": 0.6,
+    "programming_language": 0.0,
+    "skill_mastery": 0.4,
+    "leadership_claims": 0.2,
+    "team_experience": 0.8,
+    "skills and other keywords": 0.9
+  },
+  "evidence": {
+    "programming_experience": [
+      {
+        "session": 1,
+        "claim": "For the past year, I've been in the trenches"
+      },
+      {
+        "session": 5,
+        "claim": "I'm not a DevOps engineer"
+      }
+    ]
+  },
+  "notes": ""
+}
