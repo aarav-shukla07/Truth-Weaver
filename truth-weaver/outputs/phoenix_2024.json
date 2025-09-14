@@ -1,38 +1,28 @@
 {
   "shadow_id": "phoenix_2024",
   "revealed_truth": {
-    "programming_experience": "0-1 years",
+    "programming_experience": "5+ years",
     "programming_language": null,
     "skill_mastery": "advanced",
-    "leadership_claims": "uncertain",
-    "team_experience": "individual contributor",
-    "skills and other keywords": [
-      "Kubernetes",
-      "Calico",
-      "Network",
-      "Dns"
-    ]
+    "leadership_claims": "fabricated",
+    "team_experience": "mixed",
+    "skills and other keywords": []
   },
   "deception_patterns": [
     {
-      "lie_type": "experience_inflation",
+      "lie_type": "experience_inconsistency",
       "contradictory_claims": [
-        "I'm a seasoned DevOps engineer",
-        "It was an internship"
+        "Session 1: architect",
+        "Session 5: intern",
+        "Session 5: internship"
       ]
     },
     {
-      "lie_type": "leadership_fabrication",
+      "lie_type": "team_experience_contradiction",
       "contradictory_claims": [
-        "I led / was responsible",
-        "The senior engineer handled it"
-      ]
-    },
-    {
-      "lie_type": "self_contradiction",
-      "contradictory_claims": [
-        "I'm a seasoned DevOps engineer",
-        "I'm not a DevOps engineer"
+        "Session 4: Team collaboration mentioned",
+        "Session 5: Team collaboration mentioned",
+        "Session 1: Individual work mentioned"
       ]
     }
   ]

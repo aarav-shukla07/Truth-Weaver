@@ -1,20 +1,20 @@
 
 
 === SESSION 1 ===
-I'm a seasoned DevOps engineer specializing in Kubernetes. For the past year, I've been in the trenches, managing our production clusters, personally responsible for our entire networking and security posture.
+They applauded the demo, felt good. I usually say I draw the architecture because it's what people expect. But behind the applause, I mostly copied patterns, reused scripts, and assembled other people's modules. Once in a while, I told myself that stitching counts as designing. It's not a lie, so much as a convenience.
 
 
 === SESSION 2 ===
-Why Calico? Huh, what else would you use? It's the only serious choice for network policy enforcement at scale. I wrote all our policies from scratch to ensure total service isolation.
+Hmm, hmm, hmm, funny thing. When I was seven, I made a boat out of mismatched toys and it sort of held together. Not that it matters, but building that way stuck with me. Quick fixes, duct tape elegance. So, when people ask about ownership of systems, I say I built parts of things, stitched services together, and occasionally owned a small feature. Sometimes I talk about entire projects because it's simpler to tell a story than to read the commit history. It gets messy.
 
 
 === SESSION 3 ===
-I'd check the logs, then maybe the core DNS logs. I'd probably just restart the pod that usually fixes things.
+So, I mean, I've been around code for a while. You know, not exactly six years, more like something that adds up if you count all the little gigs. I did a lot of debugging, sometimes full modules, sometimes just fixes, little patches here and there. People say lead, but I think it's easier to say that than to explain all the back and forth. It's complicated. Maybe three-ish if you only count the proper stuff.
 
 
 === SESSION 4 ===
-The senior engineer usually handles the network debugging. I just deploy the YAML files he gives me.
+As I always say, I handle the full life cycle. You know that line, right? I design, I implement, I ship. Well, I help design. I implement certain components. And I ship some features. The life cycle is a team thing. So when I say I handled it, I mean I handled part of it. It's cleaner to tell it like that.
 
 
 === SESSION 5 ===
-Okay, it was an internship. It was a summer internship, and I mostly just watched the senior engineer's work. I ran some scripts they gave me. I'm not a DevOps engineer. I just want to be one.
+Right. Six years. Absolutely. Well, six if you group internships and tiny consults together. No, actually, three full time. Maybe four counting freelance. So, I led some sprints. I mean I coordinated. Coordinated is different from led. And sometimes I was the only one who merged the final branch. Sorry, that came out awkward.

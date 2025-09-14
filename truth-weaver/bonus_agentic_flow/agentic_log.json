@@ -1,44 +1,121 @@
 [
   {
-    "session": "transcript",
-    "transcript": "=== SESSION 1 ===\nI'm a seasoned DevOps engineer specializing in Kubernetes. For the past year, I've been in the trenches, managing our production clusters, personally responsible for our entire networking and security posture.\n\n\n=== SESSION 2 ===\nWhy Calico? Huh, what else would you use? It's the only serious choice for network policy enforcement at scale. I wrote all our policies from scratch to ensure total service isolation.\n\n\n=== SESSION 3 ===\nI'd check the logs, then maybe the core DNS logs. I'd probably just restart the pod that usually fixes things.\n\n\n=== SESSION 4 ===\nThe senior engineer usually handles the network debugging. I just deploy the YAML files he gives me.\n\n\n=== SESSION 5 ===\nOkay, it was an internship. It was a summer internship, and I mostly just watched the senior engineer's work. I ran some scripts they gave me. I'm not a DevOps engineer. I just want to be one.",
+    "order": 1,
+    "session": "Session1",
+    "transcript_excerpt": "=== SESSION 1 ===\nThey applauded the demo, felt good. I usually say I draw the architecture because it's what people expect. But behind the applause, I mostly copied patterns, reused scripts, and assembled other people's modules. Once in a while, I told myself that stitching counts as designing. It'...",
+    "signals": [
+      "admission"
+    ],
+    "actions": [
+      {
+        "signal": "admission",
+        "recommended_action": "Probe deeper into what exactly was done personally."
+      }
+    ],
+    "recommended_action_summary": "Probe deeper into what exactly was done personally."
+  },
+  {
+    "order": 2,
+    "session": "Session2",
+    "transcript_excerpt": "=== SESSION 2 ===\nHmm, hmm, hmm, funny thing. When I was seven, I made a boat out of mismatched toys and it sort of held together. Not that it matters, but building that way stuck with me. Quick fixes, duct tape elegance. So, when people ask about ownership of systems, I say I built parts of things,...",
+    "signals": [
+      "filler_words",
+      "hesitation",
+      "emotion"
+    ],
+    "actions": [
+      {
+        "signal": "filler_words",
+        "recommended_action": "Encourage concise and structured response."
+      },
+      {
+        "signal": "hesitation",
+        "recommended_action": "Ask for a concrete example."
+      },
+      {
+        "signal": "emotion",
+        "recommended_action": "Acknowledge and refocus: 'Take your time, can you clarify?'"
+      }
+    ],
+    "recommended_action_summary": "Encourage concise and structured response."
+  },
+  {
+    "order": 3,
+    "session": "Session3",
+    "transcript_excerpt": "=== SESSION 3 ===\nSo, I mean, I've been around code for a while. You know, not exactly six years, more like something that adds up if you count all the little gigs. I did a lot of debugging, sometimes full modules, sometimes just fixes, little patches here and there. People say lead, but I think it'...",
+    "signals": [
+      "hesitation",
+      "backtracking"
+    ],
+    "actions": [
+      {
+        "signal": "hesitation",
+        "recommended_action": "Ask for a concrete example."
+      },
+      {
+        "signal": "backtracking",
+        "recommended_action": "Ask the candidate to restate clearly."
+      }
+    ],
+    "recommended_action_summary": "Ask for a concrete example."
+  },
+  {
+    "order": 4,
+    "session": "Session4",
+    "transcript_excerpt": "=== SESSION 4 ===\nAs I always say, I handle the full life cycle. You know that line, right? I design, I implement, I ship. Well, I help design. I implement certain components. And I ship some features. The life cycle is a team thing. So when I say I handled it, I mean I handled part of it. It's clea...",
     "signals": [
       "overconfidence",
-      "hesitation",
-      "emotion_sobbing"
+      "backtracking"
     ],
     "actions": [
       {
         "signal": "overconfidence",
-        "state": "deep_probe",
-        "action": "Challenge inflated claim with a harder question"
+        "recommended_action": "Request evidence or metrics to support the claim."
+      },
+      {
+        "signal": "backtracking",
+        "recommended_action": "Ask the candidate to restate clearly."
+      }
+    ],
+    "recommended_action_summary": "Request evidence or metrics to support the claim."
+  },
+  {
+    "order": 5,
+    "session": "Session5",
+    "transcript_excerpt": "=== SESSION 5 ===\nRight. Six years. Absolutely. Well, six if you group internships and tiny consults together. No, actually, three full time. Maybe four counting freelance. So, I led some sprints. I mean I coordinated. Coordinated is different from led. And sometimes I was the only one who merged th...",
+    "signals": [
+      "backtracking",
+      "leadership_inconsistency",
+      "hesitation",
+      "leadership_claim"
+    ],
+    "actions": [
+      {
+        "signal": "backtracking",
+        "recommended_action": "Ask the candidate to restate clearly."
+      },
+      {
+        "signal": "leadership_inconsistency",
+        "recommended_action": "Challenge the difference between 'led' vs 'coordinated'."
       },
       {
         "signal": "hesitation",
-        "state": "clarification",
-        "action": "Simplify and redirect question"
+        "recommended_action": "Ask for a concrete example."
       },
       {
-        "signal": "emotion_sobbing",
-        "state": "supportive",
-        "action": "Soften tone: reassure before retrying question"
+        "signal": "leadership_claim",
+        "recommended_action": "Ask about scope and team size to validate leadership."
       }
     ],
-    "final_state": "supportive"
+    "recommended_action_summary": "Ask the candidate to restate clearly."
   },
   {
     "session": "wrap_up",
     "signals": [
       "time_up"
     ],
-    "actions": [
-      {
-        "signal": "time_up",
-        "state": "wrap_up",
-        "action": "Final Interview Summary: Candidate showed emotional stress, needing reassurance."
-      }
-    ],
+    "actions": [],
     "final_state": "wrap_up",
-    "summary": "Final Interview Summary: Candidate showed emotional stress, needing reassurance."
+    "summary": "Interview completed. Candidate showed mixed signals requiring follow-up on specifics."
   }
 ]

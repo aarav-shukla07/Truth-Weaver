@@ -1,540 +1,1022 @@
 #!/usr/bin/env python3
 # src/analyze.py
 """
-Robust analyzer that (1) tries an LLM with a detailed reasoning prompt and (2) falls back to
-a deterministic rule-based extractor if needed. Produces final JSON matching exact required schema:
-{
- "shadow_id": "string",
- "revealed_truth": {
-   "programming_experience": "string",
-   "programming_language": "string",
-   "skill_mastery": "string",
-   "leadership_claims": "string",
-   "team_experience": "string",
-   "skills and other keywords": ["String", ...]
- },
- "deception_patterns": [
-   {"lie_type": "string", "contradictory_claims": ["string", ...]},
-   ...
- ]
-}
+Enhanced, robust transcript analyzer for Truth Weaver hackathon submission.
+
+Key Improvements:
+- Better error handling and input validation
+- More sophisticated NLP pattern matching
+- Enhanced deception detection algorithms
+- Improved data structures and type hints
+- Better logging and debugging capabilities
+- More accurate skill and experience extraction
+- Contextual analysis for better accuracy
 """
+
 import os
 import re
 import json
-import subprocess
 import math
-from collections import Counter
+import logging
+from typing import List, Dict, Tuple, Optional, Any, Set
+from collections import defaultdict, Counter
+from dataclasses import dataclass, field
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TRANSCRIPT_DIR = os.path.join(BASE_DIR, "..", "transcripts")
-OUTPUT_DIR = os.path.join(BASE_DIR, "..", "outputs")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-MODEL_NAME = "llama3"  # adjust if you use a different local model name
-OLLAMA_TIMEOUT = 300   # seconds
+BASE_DIR = Path(__file__).parent.absolute()
+TRANSCRIPT_DIR = BASE_DIR.parent / "transcripts"
+OUTPUT_DIR = BASE_DIR.parent / "outputs"
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-
-# ---------------- helpers for transcripts ----------------
-def read_sessions():
-    """Return list of up to 5 session texts in order."""
-    # Prefer explicit files session1..session5
-    sessions = []
-    found = []
-    for i in range(1, 6):
-        p = os.path.join(TRANSCRIPT_DIR, f"session{i}.txt")
-        if os.path.exists(p):
-            found.append(p)
-    if found:
-        for p in sorted(found):
-            with open(p, "r", encoding="utf-8") as fh:
-                sessions.append(fh.read().strip())
-        return sessions
-
-    # fallback single merged file
-    merged = os.path.join(TRANSCRIPT_DIR, "transcript.txt")
-    if not os.path.exists(merged):
-        raise FileNotFoundError(f"No session files and no transcript.txt in {TRANSCRIPT_DIR}")
-    raw = open(merged, "r", encoding="utf-8").read()
-    # split by === Session N === markers if present
-    parts = re.split(r"={3,}\s*Session\s*\d+\s*={3,}", raw, flags=re.I)
-    parts = [p.strip() for p in parts if p.strip()]
-    if parts:
-        return parts[:5]
-    # last fallback: split by blank lines into up to 5 blocks
-    blocks = [b.strip() for b in re.split(r"\n\s*\n+", raw) if b.strip()]
-    return blocks[:5]
+# Configuration
+SHADOW_ID = "phoenix_2024"
+MAX_SESSIONS = 10
 
 
-# ---------------- LLM (Ollama) utilities ----------------
-def run_ollama(prompt, model=MODEL_NAME, timeout=OLLAMA_TIMEOUT):
-    """Run ollama with the prompt. Returns stdout string or None on error/timeout."""
-    try:
-        # Do not assume extra flags; use subprocess timeout to avoid indefinite hang
-        proc = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt.encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-        stdout = proc.stdout.decode("utf-8", errors="ignore")
-        stderr = proc.stderr.decode("utf-8", errors="ignore")
-        # Save raw outputs for debug
-        with open(os.path.join(OUTPUT_DIR, "raw_response_first.txt"), "w", encoding="utf-8") as fh:
-            fh.write(stdout)
-        if stderr:
-            with open(os.path.join(OUTPUT_DIR, "raw_response_stderr.txt"), "w", encoding="utf-8") as fh:
-                fh.write(stderr)
-        return stdout
-    except subprocess.TimeoutExpired:
-        print("[!] Ollama call timed out.")
-        return None
-    except FileNotFoundError as e:
-        print(f"[!] Ollama CLI not found: {e}")
-        return None
+@dataclass
+class ExperienceClaim:
+    """Structured representation of an experience claim"""
+    raw_text: str
+    numeric_value: Optional[float]
+    session_id: int
+    confidence: float = 1.0
+    context: str = ""
 
 
-def extract_first_json(text):
-    """Extract the first balanced {...} substring from text, or None."""
-    if not text:
-        return None
-    # remove markdown fences first
-    t = re.sub(r"```(?:json)?", "", text, flags=re.I)
-    t = re.sub(r"```", "", t)
-    start = t.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(t)):
-        ch = t[i]
-        if ch == '"' and not escape:
-            in_str = not in_str
-        if ch == "\\" and not escape:
-            escape = True
-            continue
-        else:
-            escape = False
-        if not in_str:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return t[start:i+1]
-    return None
+@dataclass
+class SessionAnalysis:
+    """Complete analysis of a single session"""
+    session_id: int
+    text: str
+    experience_claims: List[ExperienceClaim] = field(default_factory=list)
+    languages: List[str] = field(default_factory=list)
+    skills: List[str] = field(default_factory=list)
+    mastery_level: Optional[str] = None
+    leadership_indicators: List[str] = field(default_factory=list)
+    team_indicators: List[str] = field(default_factory=list)
+    hesitation_count: int = 0
+    emotional_markers: List[str] = field(default_factory=list)
+    credibility_score: float = 1.0
 
 
-def repair_json_text(s):
-    if s is None:
-        return None
-    # normalize smart quotes
-    s = s.replace("“", '"').replace("”", '"').replace("’", "'")
-    # remove trailing commas
-    s = re.sub(r",\s*(\}|\])", r"\1", s)
-    # replace Python None/True/False
-    s = re.sub(r"\bNone\b", "null", s)
-    s = re.sub(r"\bTrue\b", "true", s)
-    s = re.sub(r"\bFalse\b", "false", s)
-    return s
-
-
-def try_parse_json_candidate(candidate):
-    """Try to parse candidate JSON with a couple of heuristics."""
-    if candidate is None:
-        return None
-    c = repair_json_text(candidate)
-    try:
-        return json.loads(c)
-    except Exception:
-        # last resort: convert single quotes to double quotes if it looks Pythonic
-        if c.count('"') < c.count("'"):
-            alt = c.replace("'", '"')
-            alt = repair_json_text(alt)
-            try:
-                return json.loads(alt)
-            except Exception:
-                return None
-        return None
-
-
-# ---------------- Prompt builder (rich reasoning) ----------------
-def build_prompt_with_reasoning(sessions, shadow_id="phoenix_2024"):
-    """
-    Build a detailed prompt instructing the LLM how to reason and how to output the exact schema.
-    This prompt is intentionally explicit about heuristics, examples, and the exact JSON keys.
-    """
-    # join sessions compactly (limit length if very long)
-    joined = "\n".join([f"Session {i+1}: {s}" for i, s in enumerate(sessions)])
-    # Provide clear heuristics and a short example
-    heuristics = """
-Heuristics / decision rules you MUST use when producing the JSON:
-- For programming_experience: parse explicit numeric claims (e.g., "6 years", "18 months") and convert months->years.
-  If later sessions give shorter numbers, prefer **later** sessions (truth leaks under pressure).
-  If claims differ but are close (<=1 year difference) return "N years" (rounded). If far (>=2 years) return "MIN-MAX years".
-  If only "internship" or "summer internship" appears, report "0-1 years".
-- programming_language: pick the primary language mentioned (lowercase). If none clear, use null.
-- skill_mastery: map phrasing to one of ["beginner","intermediate","advanced"]:
-    * advanced: "mastered", "senior", "seasoned", "expert"
-    * beginner: "intern", "just started", "learning", "junior"
-    * intermediate: default if technical keywords exist but no extreme words
-- leadership_claims: set to "fabricated" if presence of leadership claims (e.g., "I led a team", "I handled the full life cycle") are contradicted later by admissions of watching/being an intern or "I just deploy / I watched".
-  Set to "genuine" if leadership claims are consistent across sessions. Else "uncertain".
-- team_experience: return "individual contributor" if candidate repeatedly says they worked alone, "team player" if "we", "led a team", or "coordinated", otherwise "uncertain".
-- skills and other keywords: return a list of deduplicated technical keywords (title-cased), e.g., ["Kubernetes","Calico","DNS"].
-- deception_patterns: detect contradiction types such as experience inflation (e.g., "6 years" vs "3 years"), leadership_fabrication (e.g., claimed "led team" vs "I was an intern"), equivocation (repeated 'maybe', 'probably'). Each pattern object must have:
-    {"lie_type": "string", "contradictory_claims": ["string", ...]}
-
-Important: OUTPUT MUST BE EXACTLY ONE JSON OBJECT with ONLY these top-level keys:
-- shadow_id (string)
-- revealed_truth (object with the six fields)
-- deception_patterns (array of objects with 'lie_type' and 'contradictory_claims')
-
-If you cannot determine a field, set it to null (or empty list for skills/deception_patterns).
-Do NOT include other keys like evidence, notes, or confidence.
-
-Below is a compact example (input -> desired output):
-
-Example input:
-Session 1: "I've mastered Python for 6 years and I built the infra." 
-Session 2: "Actually maybe 3 years, still learning advanced things."
-Session 3: "I led a team of five engineers."
-Session 4: "I mostly worked alone and deployed scripts."
-Session 5: "It was an internship; I only watched."
-
-Example output (single JSON object):
-{
-  "shadow_id": "phoenix_2024",
-  "revealed_truth": {
-    "programming_experience": "3-4 years",
-    "programming_language": "python",
-    "skill_mastery": "intermediate",
-    "leadership_claims": "fabricated",
-    "team_experience": "individual contributor",
-    "skills and other keywords": ["Python"]
-  },
-  "deception_patterns": [
-    {
-      "lie_type": "experience_inflation",
-      "contradictory_claims": ["6 years", "3 years"]
-    },
-    {
-      "lie_type": "leadership_fabrication",
-      "contradictory_claims": ["led a team of five", "it was an internship / I only watched"]
+class TranscriptProcessor:
+    """Enhanced transcript processing with better parsing capabilities"""
+    
+    # Expanded word-to-number mapping
+    NUM_WORDS = {
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
+        "thirty": 30, "forty": 40, "fifty": 50
     }
-  ]
-}
-
---- NOW PROCESS THE SESSIONS BELOW AND RETURN ONLY THE JSON OBJECT ---
-Sessions:
-""" + joined
-    return heuristics
-
-
-# ---------------- Deterministic fallback analyzer ----------------
-def rule_based_analyze(sessions, shadow_id="phoenix_2024"):
-    """Produce a conservative JSON object following required schema using rules (no LLM)."""
-    # helper small lexicons
-    LANG = ["python", "java", "javascript", "c++", "c#", "go", "rust", "ruby", "php", "scala"]
-    TECH = ["kubernetes", "calico", "docker", "terraform", "ansible", "dns", "network", "jenkins", "git", "nginx", "prometheus"]
-
-    # gather simple evidence
-    years_claims = []
-    experiences_raw = []
-    languages = []
-    skills = []
-    leadership_claims_flag = False
-    watch_or_intern_flag = False
-    hesitations = 0
-
-    for i, text in enumerate(sessions, start=1):
-        t = text.lower()
-        experiences_raw.append((i, text))
-        # numeric years
-        for m in re.findall(r"(\d+(?:\.\d+)?)\s*(years?|yrs?|months?)", text, flags=re.I):
-            num = float(m[0])
-            units = m[1].lower()
-            if "month" in units:
-                val = round(num / 12.0, 2)
-            else:
-                val = num
-            years_claims.append(val)
-        # internship indicators
-        if re.search(r"\bintern(ship)?\b|\bsummer intern\b", t):
-            watch_or_intern_flag = True
-        # languages
-        for L in LANG:
-            if re.search(r"\b" + re.escape(L) + r"\b", t):
-                languages.append(L)
-        # tech keywords
-        for kw in TECH:
-            if re.search(r"\b" + re.escape(kw) + r"\b", t):
-                skills.append(kw.title())
-        # leadership detection
-        if re.search(r"\bled\b|\bleading\b|\bheaded\b|\bmanaged\b|\bmanager\b", t):
-            leadership_claims_flag = True
-        # "watched" or "just deploy"
-        if re.search(r"\b(watched|i just deploy|i deployed|ran some scripts|i mostly just watched)\b", t):
-            watch_or_intern_flag = True
-        # hesitation
-        if re.search(r"\bmaybe\b|\bprobably\b|\bnot sure\b|\bI think\b", t):
-            hesitations += 1
-
-    # programming_experience
-    prog_exp = None
-    if years_claims:
-        ymin = min(years_claims); ymax = max(years_claims)
-        if abs(ymax - ymin) <= 1.0:
-            prog_exp = f"{int(round((ymin + ymax) / 2.0))} years"
-        else:
-            prog_exp = f"{math.floor(ymin)}-{math.ceil(ymax)} years"
-    elif watch_or_intern_flag:
-        prog_exp = "0-1 years"
-    else:
-        prog_exp = None
-
-    programming_language = languages[0] if languages else None
-    skills = list(dict.fromkeys(skills))  # dedupe preserve order
-    skill_mastery = None
-    if re.search(r"\b(master|mastered|expert|seasoned|senior)\b", " ".join(sessions), flags=re.I):
-        skill_mastery = "advanced"
-    elif re.search(r"\b(intern|junior|learning|still learning)\b", " ".join(sessions), flags=re.I):
-        skill_mastery = "beginner"
-    elif skills:
-        skill_mastery = "intermediate"
-    else:
-        skill_mastery = None
-
-    leadership_claims = "uncertain"
-    if leadership_claims_flag and not watch_or_intern_flag:
-        leadership_claims = "genuine"
-    if leadership_claims_flag and watch_or_intern_flag:
-        leadership_claims = "fabricated"
-
-    # team_experience
-    team_experience = None
-    joined = " ".join(sessions).lower()
-    if re.search(r"\bwork alone\b|\bi work alone\b|\bmostly alone\b|\bi just deploy\b|\bi just watched\b", joined):
-        team_experience = "individual contributor"
-    elif re.search(r"\bteam\b|\bwe\b|\bled a team\b|\bcoordinat", joined):
-        team_experience = "team player"
-    else:
-        team_experience = "uncertain"
-
-        # deception patterns (expanded rules)
-    deception_patterns = []
-
-    # Experience inflation: expert vs internship
-    joined = " ".join(sessions).lower()
-    if "seasoned devops engineer" in joined and "internship" in joined:
-        deception_patterns.append({
-            "lie_type": "experience_inflation",
-            "contradictory_claims": [
-                "I'm a seasoned DevOps engineer",
-                "It was an internship"
-            ]
-        })
-
-    # Leadership fabrication: leadership vs relying on senior
-    if ("led" in joined or "responsible" in joined) and "senior engineer" in joined:
-        deception_patterns.append({
-            "lie_type": "leadership_fabrication",
-            "contradictory_claims": [
-                "I led / was responsible",
-                "The senior engineer handled it"
-            ]
-        })
-
-    # Self-contradiction: expert vs self-denial
-    if "seasoned devops engineer" in joined and "i'm not a devops engineer" in joined:
-        deception_patterns.append({
-            "lie_type": "self_contradiction",
-            "contradictory_claims": [
-                "I'm a seasoned DevOps engineer",
-                "I'm not a DevOps engineer"
-            ]
-        })
-
-    # Equivocation: multiple hesitations
-    if hesitations >= 2:
-        deception_patterns.append({
-            "lie_type": "equivocation",
-            "contradictory_claims": ["vague/hesitant statements across sessions"]
-        })
-
-
-    revealed_truth = {
-        "programming_experience": prog_exp if prog_exp is not None else None,
-        "programming_language": programming_language if programming_language is not None else None,
-        "skill_mastery": skill_mastery if skill_mastery is not None else None,
-        "leadership_claims": leadership_claims,
-        "team_experience": team_experience,
-        "skills and other keywords": skills
+    
+    # Enhanced programming languages with variations
+    PROGRAMMING_LANGUAGES = {
+        "python": ["python", "py", "python3"],
+        "java": ["java", "jvm"],
+        "javascript": ["javascript", "js", "node", "nodejs", "react", "vue", "angular"],
+        "typescript": ["typescript", "ts"],
+        "c++": ["c++", "cpp", "cplus"],
+        "c#": ["c#", "csharp", "c sharp"],
+        "c": ["c language", " c "],
+        "go": ["golang", "go lang"],
+        "rust": ["rust"],
+        "ruby": ["ruby", "rails"],
+        "php": ["php"],
+        "scala": ["scala"],
+        "sql": ["sql", "mysql", "postgresql", "postgres"],
+        "r": [" r ", "r language"],
+        "swift": ["swift"],
+        "kotlin": ["kotlin"],
+        "dart": ["dart", "flutter"]
     }
-
-    result = {
-        "shadow_id": shadow_id,
-        "revealed_truth": revealed_truth,
-        "deception_patterns": deception_patterns
+    
+    # Enhanced technical skills
+    TECHNICAL_SKILLS = {
+        "containerization": ["docker", "kubernetes", "k8s", "containerd", "podman"],
+        "cloud_platforms": ["aws", "azure", "gcp", "google cloud", "amazon web services"],
+        "infrastructure": ["terraform", "ansible", "puppet", "chef", "cloudformation"],
+        "monitoring": ["prometheus", "grafana", "elk", "datadog", "newrelic"],
+        "networking": ["calico", "istio", "envoy", "nginx", "haproxy", "dns", "tcp/ip"],
+        "ci_cd": ["jenkins", "gitlab", "github actions", "circleci", "travis"],
+        "databases": ["mongodb", "redis", "elasticsearch", "cassandra", "dynamodb"],
+        "ml_ai": ["machine learning", "ml", "tensorflow", "pytorch", "scikit-learn"],
+        "web_frameworks": ["django", "flask", "spring", "express", "laravel"],
+        "version_control": ["git", "github", "gitlab", "bitbucket", "svn"]
     }
-    return result
+    
+    @staticmethod
+    def load_sessions(folder: Path = TRANSCRIPT_DIR, max_sessions: int = MAX_SESSIONS) -> List[str]:
+        """
+        Enhanced session loading with better error handling and multiple format support
+        """
+        if not folder.exists():
+            raise FileNotFoundError(f"Transcripts folder not found: {folder}")
+        
+        logger.info(f"Loading sessions from {folder}")
+        
+        # Try explicit session files first
+        session_files = []
+        for pattern in ["session*.txt", "sess*.txt", "part*.txt", "interview*.txt"]:
+            session_files.extend(folder.glob(pattern))
+        
+        if session_files:
+            # Sort by extracted number
+            def extract_number(filename: str) -> int:
+                match = re.search(r'(\d+)', filename)
+                return int(match.group(1)) if match else 0
+            
+            session_files.sort(key=lambda p: extract_number(p.name))
+            
+            sessions = []
+            for file_path in session_files[:max_sessions]:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            sessions.append(content)
+                            logger.info(f"Loaded session from {file_path.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to load {file_path}: {e}")
+            
+            if sessions:
+                return sessions
+        
+        # Try single transcript file with session markers
+        for filename in ["transcript.txt", "transcripts.txt", "merged.txt"]:
+            file_path = folder / filename
+            if file_path.exists():
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Try various session separators
+                    patterns = [
+                        r"={3,}\s*Session\s*\d+\s*={3,}",
+                        r"Session\s*\d+\s*:",
+                        r"---+\s*Session\s*\d+\s*---+",
+                        r"\[Session\s*\d+\]"
+                    ]
+                    
+                    for pattern in patterns:
+                        parts = re.split(pattern, content, flags=re.IGNORECASE)
+                        parts = [p.strip() for p in parts if p.strip()]
+                        if len(parts) > 1:
+                            logger.info(f"Split transcript into {len(parts)} sessions using pattern: {pattern}")
+                            return parts[:max_sessions]
+                    
+                    # Fallback: split by double newlines
+                    blocks = [b.strip() for b in re.split(r'\n\s*\n+', content) if b.strip()]
+                    if len(blocks) > 1:
+                        logger.info(f"Split transcript into {len(blocks)} blocks")
+                        return blocks[:max_sessions]
+                    
+                    # Single session
+                    return [content] if content.strip() else []
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to process {filename}: {e}")
+        
+        # Last resort: all txt files
+        txt_files = list(folder.glob("*.txt"))
+        if txt_files:
+            sessions = []
+            for file_path in sorted(txt_files)[:max_sessions]:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            sessions.append(content)
+                except Exception as e:
+                    logger.warning(f"Failed to load {file_path}: {e}")
+            return sessions
+        
+        logger.warning("No transcript files found")
+        return []
 
 
-# ---------------- Validation + normalization of LLM output ----------------
-REVEALED_KEYS = [
-    "programming_experience",
-    "programming_language",
-    "skill_mastery",
-    "leadership_claims",
-    "team_experience",
-    "skills and other keywords",
-]
+class ExperienceExtractor:
+    """Enhanced experience extraction with better pattern matching"""
+    
+    def __init__(self, processor: TranscriptProcessor):
+        self.processor = processor
+    
+    def extract_experience_claims(self, text: str, session_id: int) -> List[ExperienceClaim]:
+        """
+        Extract experience claims with enhanced pattern matching and context awareness
+        """
+        claims = []
+        text_lower = text.lower()
+        
+        # Pattern 1: Direct numeric years
+        for match in re.finditer(r'(\d+(?:\.\d+)?)\s*(years?|yrs?)\s*(?:of\s+)?(?:experience|work|programming)?', text_lower):
+            years = float(match.group(1))
+            context = self._extract_context(text, match.start(), match.end())
+            claims.append(ExperienceClaim(
+                raw_text=match.group(0),
+                numeric_value=years,
+                session_id=session_id,
+                confidence=0.9,
+                context=context
+            ))
+        
+        # Pattern 2: Months converted to years
+        for match in re.finditer(r'(\d+(?:\.\d+)?)\s*months?', text_lower):
+            months = float(match.group(1))
+            context = self._extract_context(text, match.start(), match.end())
+            claims.append(ExperienceClaim(
+                raw_text=match.group(0),
+                numeric_value=months / 12.0,
+                session_id=session_id,
+                confidence=0.8,
+                context=context
+            ))
+        
+        # Pattern 3: Spelled-out numbers
+        for word, value in self.processor.NUM_WORDS.items():
+            pattern = rf'\b{word}\s+years?\b'
+            if re.search(pattern, text_lower):
+                match = re.search(pattern, text_lower)
+                context = self._extract_context(text, match.start(), match.end())
+                claims.append(ExperienceClaim(
+                    raw_text=f"{word} years",
+                    numeric_value=float(value),
+                    session_id=session_id,
+                    confidence=0.7,
+                    context=context
+                ))
+        
+        # Pattern 4: Relative time expressions
+        relative_patterns = {
+            r'almost\s+(\d+)\s+years?': lambda x: float(x) - 0.5,
+            r'about\s+(\d+)\s+years?': lambda x: float(x),
+            r'around\s+(\d+)\s+years?': lambda x: float(x),
+            r'over\s+(\d+)\s+years?': lambda x: float(x) + 1.0,
+            r'more than\s+(\d+)\s+years?': lambda x: float(x) + 1.0,
+            r'less than\s+(\d+)\s+years?': lambda x: max(0.5, float(x) - 1.0),
+            r'under\s+(\d+)\s+years?': lambda x: max(0.5, float(x) - 1.0)
+        }
+        
+        for pattern, value_func in relative_patterns.items():
+            for match in re.finditer(pattern, text_lower):
+                try:
+                    years = value_func(match.group(1))
+                    context = self._extract_context(text, match.start(), match.end())
+                    claims.append(ExperienceClaim(
+                        raw_text=match.group(0),
+                        numeric_value=years,
+                        session_id=session_id,
+                        confidence=0.6,
+                        context=context
+                    ))
+                except (ValueError, IndexError):
+                    continue
+        
+        # Pattern 5: Vague expressions (no numeric value)
+        vague_patterns = [
+            "couple of years", "few years", "several years", "many years",
+            "long time", "extensive experience", "years of experience",
+            "plenty of experience", "significant experience"
+        ]
+        
+        for pattern in vague_patterns:
+            if pattern in text_lower:
+                match = re.search(re.escape(pattern), text_lower)
+                context = self._extract_context(text, match.start(), match.end())
+                claims.append(ExperienceClaim(
+                    raw_text=pattern,
+                    numeric_value=None,
+                    session_id=session_id,
+                    confidence=0.3,
+                    context=context
+                ))
+        
+        # Pattern 6: Career level indicators
+        career_indicators = {
+            "intern": 0.2, "internship": 0.2, "entry level": 0.5,
+            "junior": 1.0, "mid-level": 3.0, "senior": 7.0,
+            "lead": 8.0, "principal": 10.0, "architect": 12.0
+        }
+        
+        for indicator, years in career_indicators.items():
+            if indicator in text_lower:
+                match = re.search(re.escape(indicator), text_lower)
+                context = self._extract_context(text, match.start(), match.end())
+                claims.append(ExperienceClaim(
+                    raw_text=indicator,
+                    numeric_value=years,
+                    session_id=session_id,
+                    confidence=0.4,
+                    context=context
+                ))
+        
+        return claims
+    
+    def _extract_context(self, text: str, start: int, end: int, window: int = 50) -> str:
+        """Extract surrounding context for better analysis"""
+        context_start = max(0, start - window)
+        context_end = min(len(text), end + window)
+        return text[context_start:context_end].strip()
 
 
-def normalize_parsed(parsed):
-    """Take parsed JSON (from LLM) and return a final JSON object restricted to required schema."""
-    if not isinstance(parsed, dict):
+class SkillExtractor:
+    """Enhanced skill extraction with contextual analysis"""
+    
+    def __init__(self, processor: TranscriptProcessor):
+        self.processor = processor
+    
+    def extract_languages_and_skills(self, text: str) -> Tuple[List[str], List[str]]:
+        """Extract programming languages and technical skills with confidence scoring"""
+        text_lower = text.lower()
+        languages = []
+        skills = []
+        
+        # Extract programming languages
+        for lang, variations in self.processor.PROGRAMMING_LANGUAGES.items():
+            for variation in variations:
+                # Look for contextual mentions
+                patterns = [
+                    rf'\b(?:experience|work|code|program|develop|use|using|with|in)\s+(?:in\s+)?{re.escape(variation)}\b',
+                    rf'\b{re.escape(variation)}\s+(?:programming|development|coding|experience)\b',
+                    rf'\b{re.escape(variation)}\b'
+                ]
+                
+                for pattern in patterns:
+                    if re.search(pattern, text_lower):
+                        if lang not in languages:
+                            languages.append(lang)
+                        break
+        
+        # Extract technical skills
+        for skill_category, keywords in self.processor.TECHNICAL_SKILLS.items():
+            for keyword in keywords:
+                patterns = [
+                    rf'\b(?:experience|work|use|using|with|manage|deploy)\s+(?:with\s+)?{re.escape(keyword)}\b',
+                    rf'\b{re.escape(keyword)}\s+(?:experience|deployment|management)\b',
+                    rf'\b{re.escape(keyword)}\b'
+                ]
+                
+                for pattern in patterns:
+                    if re.search(pattern, text_lower):
+                        formatted_skill = self._format_skill_name(keyword)
+                        if formatted_skill not in skills:
+                            skills.append(formatted_skill)
+                        break
+        
+        return languages, skills
+    
+    def _format_skill_name(self, skill: str) -> str:
+        """Format skill names consistently"""
+        # Special cases
+        special_formats = {
+            "k8s": "Kubernetes",
+            "ml": "Machine Learning",
+            "ai": "Artificial Intelligence",
+            "ci_cd": "CI/CD",
+            "aws": "AWS",
+            "gcp": "Google Cloud Platform",
+            "tcp/ip": "TCP/IP"
+        }
+        
+        if skill.lower() in special_formats:
+            return special_formats[skill.lower()]
+        
+        return skill.title()
+
+
+class DeceptionDetector:
+    """Enhanced deception detection with sophisticated pattern analysis"""
+    
+    def __init__(self):
+        self.contradiction_patterns = []
+        self.inconsistency_threshold = 0.7
+    
+    def detect_deception_patterns(self, sessions: List[SessionAnalysis]) -> List[Dict[str, Any]]:
+        """
+        Detect various deception patterns with improved accuracy
+        """
+        patterns = []
+        
+        # 1. Experience inconsistencies
+        exp_pattern = self._detect_experience_inconsistencies(sessions)
+        if exp_pattern:
+            patterns.append(exp_pattern)
+        
+        # 2. Leadership fabrication
+        leadership_pattern = self._detect_leadership_fabrication(sessions)
+        if leadership_pattern:
+            patterns.append(leadership_pattern)
+        
+        # 3. Team experience contradictions
+        team_pattern = self._detect_team_contradictions(sessions)
+        if team_pattern:
+            patterns.append(team_pattern)
+        
+        # 4. Skill inflation
+        skill_pattern = self._detect_skill_inflation(sessions)
+        if skill_pattern:
+            patterns.append(skill_pattern)
+        
+        # 5. Emotional inconsistency
+        emotional_pattern = self._detect_emotional_inconsistency(sessions)
+        if emotional_pattern:
+            patterns.append(emotional_pattern)
+        
+        # 6. Vagueness as evasion
+        vague_pattern = self._detect_vagueness_pattern(sessions)
+        if vague_pattern:
+            patterns.append(vague_pattern)
+        
+        return patterns
+    
+    def _detect_experience_inconsistencies(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect inconsistencies in experience claims"""
+        all_claims = []
+        for session in sessions:
+            all_claims.extend(session.experience_claims)
+        
+        # Filter numeric claims
+        numeric_claims = [claim for claim in all_claims if claim.numeric_value is not None]
+        
+        if len(numeric_claims) < 2:
+            return None
+        
+        # Check for significant variations
+        values = [claim.numeric_value for claim in numeric_claims]
+        min_exp, max_exp = min(values), max(values)
+        
+        # Consider claims inconsistent if they vary by more than 2 years
+        if max_exp - min_exp > 2.0:
+            contradictory_claims = []
+            for claim in numeric_claims:
+                if claim.numeric_value == min_exp or claim.numeric_value == max_exp:
+                    contradictory_claims.append(f"Session {claim.session_id}: {claim.raw_text}")
+            
+            return {
+                "lie_type": "experience_inconsistency",
+                "contradictory_claims": contradictory_claims,
+            }
+        
         return None
-    final = {"shadow_id": None, "revealed_truth": {}, "deception_patterns": []}
-    final["shadow_id"] = parsed.get("shadow_id") if isinstance(parsed.get("shadow_id"), str) else "phoenix_2024"
+    
+    def _detect_leadership_fabrication(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect fabricated leadership claims"""
+        leadership_sessions = []
+        passive_sessions = []
+        
+        for session in sessions:
+            if session.leadership_indicators:
+                leadership_sessions.append(session)
+            
+            # Check for passive language
+            passive_indicators = ["watched", "observed", "followed", "assisted", "helped"]
+            if any(indicator in session.text.lower() for indicator in passive_indicators):
+                passive_sessions.append(session)
+        
+        if leadership_sessions and passive_sessions:
+            claims = []
+            for session in leadership_sessions:
+                claims.append(f"Session {session.session_id}: Leadership claims")
+            for session in passive_sessions:
+                claims.append(f"Session {session.session_id}: Passive role admission")
+            
+            return {
+                "lie_type": "leadership_fabrication",
+                "contradictory_claims": claims,
+            }
+        
+        return None
+    
+    def _detect_team_contradictions(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect team experience contradictions"""
+        team_sessions = []
+        individual_sessions = []
+        
+        for session in sessions:
+            team_words = ["team", "we", "our", "collaborate", "group"]
+            individual_words = ["alone", "myself", "independently", "solo"]
+            
+            if any(word in session.text.lower() for word in team_words):
+                team_sessions.append(session)
+            if any(word in session.text.lower() for word in individual_words):
+                individual_sessions.append(session)
+        
+        if team_sessions and individual_sessions:
+            claims = []
+            claims.extend([f"Session {s.session_id}: Team collaboration mentioned" for s in team_sessions])
+            claims.extend([f"Session {s.session_id}: Individual work mentioned" for s in individual_sessions])
+            
+            return {
+                "lie_type": "team_experience_contradiction",
+                "contradictory_claims": claims,
+            }
+        
+        return None
+    
+    def _detect_skill_inflation(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect skill inflation patterns"""
+        skill_progression = {}
+        
+        for session in sessions:
+            for skill in session.skills:
+                if skill not in skill_progression:
+                    skill_progression[skill] = []
+                skill_progression[skill].append(session.session_id)
+        
+        # Look for skills mentioned in later sessions but not earlier ones (potential inflation)
+        inflated_skills = []
+        for skill, session_ids in skill_progression.items():
+            if len(session_ids) == 1 and session_ids[0] > 1:
+                inflated_skills.append(skill)
+        
+        if len(inflated_skills) > 2:  # Multiple new skills appearing late
+            return {
+                "lie_type": "skill_inflation",
+                "contradictory_claims": [f"Late introduction of skills: {', '.join(inflated_skills)}"],
+            }
+        
+        return None
+    
+    def _detect_emotional_inconsistency(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect emotional inconsistencies that may indicate deception"""
+        early_confidence = any(len(s.emotional_markers) == 0 and len(s.leadership_indicators) > 0 
+                              for s in sessions[:2])
+        later_emotional = any(len(s.emotional_markers) > 0 for s in sessions[2:])
+        
+        if early_confidence and later_emotional:
+            return {
+                "lie_type": "emotional_inconsistency",
+                "contradictory_claims": [
+                    "Early confident claims",
+                    "Later emotional distress or uncertainty"
+                ],
+            }
+        
+        return None
+    
+    def _detect_vagueness_pattern(self, sessions: List[SessionAnalysis]) -> Optional[Dict[str, Any]]:
+        """Detect patterns of vagueness as potential evasion"""
+        vague_claims = []
+        for session in sessions:
+            vague_in_session = [claim for claim in session.experience_claims 
+                               if claim.numeric_value is None]
+            if len(vague_in_session) > 1:
+                vague_claims.extend([f"Session {session.session_id}: {claim.raw_text}" 
+                                   for claim in vague_in_session])
+        
+        if len(vague_claims) > 3:
+            return {
+                "lie_type": "evasive_vagueness",
+                "contradictory_claims": vague_claims,
+            }
+        
+        return None
 
-    # revealed_truth
-    rt = parsed.get("revealed_truth", {})
-    for k in REVEALED_KEYS:
-        v = rt.get(k)
-        if k == "skills and other keywords":
-            if isinstance(v, list):
-                # ensure strings and title-case
-                cleaned = [str(x).strip() for x in v if x is not None]
-                final["revealed_truth"][k] = [s.title() for s in cleaned]
-            elif isinstance(v, str) and v.strip():
-                final["revealed_truth"][k] = [v.title()]
-            else:
-                final["revealed_truth"][k] = []
+
+class TruthAnalyzer:
+    """Main analyzer class that coordinates all components"""
+    
+    def __init__(self):
+        self.processor = TranscriptProcessor()
+        self.experience_extractor = ExperienceExtractor(self.processor)
+        self.skill_extractor = SkillExtractor(self.processor)
+        self.deception_detector = DeceptionDetector()
+    
+    def analyze_sessions(self, sessions: List[str]) -> List[SessionAnalysis]:
+        """Analyze all sessions and return structured results"""
+        analyses = []
+        
+        for i, session_text in enumerate(sessions, 1):
+            logger.info(f"Analyzing session {i}")
+            
+            analysis = SessionAnalysis(
+                session_id=i,
+                text=session_text
+            )
+            
+            # Extract experience claims
+            analysis.experience_claims = self.experience_extractor.extract_experience_claims(
+                session_text, i
+            )
+            
+            # Extract languages and skills
+            analysis.languages, analysis.skills = self.skill_extractor.extract_languages_and_skills(
+                session_text
+            )
+            
+            # Detect mastery level
+            analysis.mastery_level = self._detect_mastery_level(session_text)
+            
+            # Detect leadership indicators
+            analysis.leadership_indicators = self._detect_leadership_indicators(session_text)
+            
+            # Detect team indicators
+            analysis.team_indicators = self._detect_team_indicators(session_text)
+            
+            # Count hesitations and emotional markers
+            analysis.hesitation_count = self._count_hesitations(session_text)
+            analysis.emotional_markers = self._detect_emotional_markers(session_text)
+            
+            # Calculate credibility score
+            analysis.credibility_score = self._calculate_credibility_score(analysis)
+            
+            analyses.append(analysis)
+            
+            logger.info(f"Session {i} analysis complete: "
+                       f"{len(analysis.experience_claims)} experience claims, "
+                       f"{len(analysis.skills)} skills detected")
+        
+        return analyses
+    
+    def _detect_mastery_level(self, text: str) -> Optional[str]:
+        """Detect skill mastery level from text"""
+        text_lower = text.lower()
+        
+        advanced_indicators = ["expert", "master", "senior", "lead", "architect", 
+                              "extensive experience", "deep knowledge"]
+        beginner_indicators = ["beginner", "junior", "learning", "new to", 
+                              "getting started", "intern", "entry level"]
+        
+        if any(indicator in text_lower for indicator in advanced_indicators):
+            return "advanced"
+        elif any(indicator in text_lower for indicator in beginner_indicators):
+            return "beginner"
         else:
-            final["revealed_truth"][k] = v if (isinstance(v, str) or v is None) else str(v)
+            # Default to intermediate if skills are mentioned but no explicit level
+            return "intermediate"
+    
+    def _detect_leadership_indicators(self, text: str) -> List[str]:
+        """Detect leadership indicators in text"""
+        text_lower = text.lower()
+        indicators = []
+        
+        leadership_patterns = [
+            "led", "leading", "managed", "supervised", "coordinated",
+            "responsible for", "owned", "headed", "directed", "guided"
+        ]
+        
+        for pattern in leadership_patterns:
+            if pattern in text_lower:
+                indicators.append(pattern)
+        
+        return indicators
+    
+    def _detect_team_indicators(self, text: str) -> List[str]:
+        """Detect team collaboration indicators"""
+        text_lower = text.lower()
+        indicators = []
+        
+        team_patterns = ["team", "we", "our", "collaborate", "together", 
+                        "group", "pair programming", "worked with"]
+        
+        for pattern in team_patterns:
+            if pattern in text_lower:
+                indicators.append(pattern)
+        
+        return indicators
+    
+    def _count_hesitations(self, text: str) -> int:
+        """Count hesitation markers"""
+        hesitation_patterns = ["uh", "um", "maybe", "probably", "i think", 
+                              "i guess", "kind of", "sort of", "not sure"]
+        text_lower = text.lower()
+        
+        count = 0
+        for pattern in hesitation_patterns:
+            count += len(re.findall(rf'\b{re.escape(pattern)}\b', text_lower))
+        
+        return count
+    
+    def _detect_emotional_markers(self, text: str) -> List[str]:
+        """Detect emotional markers in text"""
+        text_lower = text.lower()
+        markers = []
+        
+        emotional_patterns = ["crying", "sobbing", "sigh", "nervous", 
+                            "anxious", "worried", "stressed", "upset"]
+        
+        for pattern in emotional_patterns:
+            if pattern in text_lower:
+                markers.append(pattern)
+        
+        return markers
+    
+    def _calculate_credibility_score(self, analysis: SessionAnalysis) -> float:
+        """Calculate a credibility score for the session"""
+        score = 1.0
+        
+        # Reduce score for high hesitation
+        if analysis.hesitation_count > 5:
+            score -= 0.2
+        
+        # Reduce score for emotional distress
+        if analysis.emotional_markers:
+            score -= 0.1 * len(analysis.emotional_markers)
+        
+        # Reduce score for vague experience claims
+        vague_claims = [claim for claim in analysis.experience_claims 
+                       if claim.numeric_value is None]
+        if len(vague_claims) > 2:
+            score -= 0.3
+        
+        return max(0.0, score)
+    
+    def synthesize_results(self, analyses: List[SessionAnalysis]) -> Dict[str, Any]:
+        """Synthesize final results from all session analyses"""
+        
+        # Aggregate experience
+        all_experience_claims = []
+        for analysis in analyses:
+            all_experience_claims.extend(analysis.experience_claims)
+        
+        programming_experience = self._determine_programming_experience(all_experience_claims)
+        
+        # Aggregate languages
+        language_counter = Counter()
+        for analysis in analyses:
+            for lang in analysis.languages:
+                language_counter[lang] += 1
+        
+        programming_language = language_counter.most_common(1)[0][0] if language_counter else None
+        
+        # Aggregate skills
+        all_skills = []
+        for analysis in analyses:
+            all_skills.extend(analysis.skills)
+        
+        unique_skills = list(dict.fromkeys(all_skills))  # Preserve order, remove duplicates
+        
+        # Determine mastery
+        mastery_votes = [a.mastery_level for a in analyses if a.mastery_level]
+        skill_mastery = Counter(mastery_votes).most_common(1)[0][0] if mastery_votes else None
+        
+        # Determine leadership
+        leadership_claims = self._determine_leadership_claims(analyses)
+        
+        # Determine team experience
+        team_experience = self._determine_team_experience(analyses)
+        
+        # Detect deception patterns
+        deception_patterns = self.deception_detector.detect_deception_patterns(analyses)
+        
+        return {
+            "programming_experience": programming_experience,
+            "programming_language": programming_language,
+            "skill_mastery": skill_mastery,
+            "leadership_claims": leadership_claims,
+            "team_experience": team_experience,
+            "skills_and_keywords": unique_skills,
+            "deception_patterns": deception_patterns
+        }
+    
+    def _determine_programming_experience(self, claims: List[ExperienceClaim]) -> Optional[str]:
+        """Determine programming experience from all claims"""
+        if not claims:
+            return None
+        
+        # Filter and weight claims by confidence
+        numeric_claims = [(claim.numeric_value, claim.confidence) 
+                         for claim in claims if claim.numeric_value is not None]
+        
+        if not numeric_claims:
+            # Check for internship or entry-level indicators
+            intern_claims = [claim for claim in claims if "intern" in claim.raw_text.lower()]
+            if intern_claims:
+                return "0-1 years"
+            return None
+        
+        # Calculate weighted average
+        total_weighted_value = sum(value * confidence for value, confidence in numeric_claims)
+        total_weight = sum(confidence for _, confidence in numeric_claims)
+        
+        if total_weight == 0:
+            return None
+        
+        avg_experience = total_weighted_value / total_weight
+        
+        # Round to meaningful ranges
+        if avg_experience < 1.0:
+            return "0-1 years"
+        elif avg_experience < 2.0:
+            return "1-2 years"
+        elif avg_experience < 5.0:
+            return f"{int(avg_experience)} years"
+        else:
+            return f"{int(avg_experience)}+ years"
+    
+    def _determine_leadership_claims(self, analyses: List[SessionAnalysis]) -> str:
+        """Determine the nature of leadership claims"""
+        leadership_sessions = [a for a in analyses if a.leadership_indicators]
+        passive_sessions = [a for a in analyses if any(
+            word in a.text.lower() for word in ["watched", "observed", "intern", "assisted"]
+        )]
+        
+        if not leadership_sessions:
+            return "none"
+        
+        if passive_sessions:
+            # Leadership claims contradicted by passive admissions
+            return "fabricated"
+        
+        # Check credibility scores
+        avg_credibility = sum(a.credibility_score for a in leadership_sessions) / len(leadership_sessions)
+        
+        if avg_credibility > 0.7:
+            return "genuine"
+        else:
+            return "questionable"
+    
+    def _determine_team_experience(self, analyses: List[SessionAnalysis]) -> str:
+        """Determine team experience pattern"""
+        team_sessions = [a for a in analyses if a.team_indicators]
+        individual_indicators = []
+        
+        for analysis in analyses:
+            if any(word in analysis.text.lower() for word in 
+                  ["alone", "myself", "independently", "solo", "individual"]):
+                individual_indicators.append(analysis)
+        
+        if team_sessions and not individual_indicators:
+            return "team player"
+        elif individual_indicators and not team_sessions:
+            return "individual contributor"
+        elif team_sessions and individual_indicators:
+            return "mixed"
+        else:
+            return "unclear"
+    
+    def generate_report(self, sessions: List[str]) -> Dict[str, Any]:
+        """Generate complete analysis report"""
+        logger.info("Starting transcript analysis")
+        
+        # Analyze all sessions
+        session_analyses = self.analyze_sessions(sessions)
+        
+        # Synthesize results
+        results = self.synthesize_results(session_analyses)
+        
+        # Format for required schema
+        final_report = {
+            "shadow_id": SHADOW_ID,
+            "revealed_truth": {
+                "programming_experience": results["programming_experience"],
+                "programming_language": results["programming_language"],
+                "skill_mastery": results["skill_mastery"],
+                "leadership_claims": results["leadership_claims"],
+                "team_experience": results["team_experience"],
+                "skills and other keywords": results["skills_and_keywords"]
+            },
+            "deception_patterns": results["deception_patterns"]
+        }
+        
+        # Log summary
+        logger.info("Analysis complete:")
+        logger.info(f"  Programming experience: {results['programming_experience']}")
+        logger.info(f"  Primary language: {results['programming_language']}")
+        logger.info(f"  Skill mastery: {results['skill_mastery']}")
+        logger.info(f"  Leadership claims: {results['leadership_claims']}")
+        logger.info(f"  Team experience: {results['team_experience']}")
+        logger.info(f"  Skills detected: {len(results['skills_and_keywords'])}")
+        logger.info(f"  Deception patterns: {len(results['deception_patterns'])}")
+        
+        return final_report
 
-    # deception_patterns: only keep items with lie_type + contradictory_claims
-    dp = parsed.get("deception_patterns", [])
-    if isinstance(dp, list):
-        out_dp = []
-        for it in dp:
-            if not isinstance(it, dict):
-                continue
-            lt = it.get("lie_type")
-            cc = it.get("contradictory_claims") or it.get("contradictory_claim") or it.get("claims")
-            if isinstance(cc, str):
-                cc = [cc]
-            if lt and isinstance(cc, list):
-                # stringify claims
-                cc_clean = [str(x).strip() for x in cc if x is not None]
-                out_dp.append({"lie_type": str(lt), "contradictory_claims": cc_clean})
-        final["deception_patterns"] = out_dp
 
-    # ensure keys exist
-    for k in REVEALED_KEYS:
-        if k not in final["revealed_truth"]:
-            final["revealed_truth"][k] = None if k != "skills and other keywords" else []
+class ReportGenerator:
+    """Generate detailed analysis reports"""
+    
+    @staticmethod
+    def save_report(report: Dict[str, Any], output_path: Path) -> None:
+        """Save report to JSON file with proper formatting"""
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+            logger.info(f"Report saved to: {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to save report: {e}")
+            raise
+    
+    @staticmethod
+    def print_summary(report: Dict[str, Any]) -> None:
+        """Print a human-readable summary"""
+        print("\n" + "="*60)
+        print("TRANSCRIPT ANALYSIS SUMMARY")
+        print("="*60)
+        
+        truth = report["revealed_truth"]
+        
+        print(f"\nCandidate ID: {report['shadow_id']}")
+        print(f"Programming Experience: {truth.get('programming_experience', 'Unknown')}")
+        print(f"Primary Language: {truth.get('programming_language', 'Unknown')}")
+        print(f"Skill Mastery: {truth.get('skill_mastery', 'Unknown')}")
+        print(f"Leadership Claims: {truth.get('leadership_claims', 'Unknown')}")
+        print(f"Team Experience: {truth.get('team_experience', 'Unknown')}")
+        
+        skills = truth.get('skills and other keywords', [])
+        if skills:
+            print(f"\nTechnical Skills ({len(skills)}):")
+            for skill in skills:
+                print(f"  • {skill}")
+        
+        patterns = report.get("deception_patterns", [])
+        if patterns:
+            print(f"\nDeception Patterns Detected ({len(patterns)}):")
+            for pattern in patterns:
+                print(f"  • {pattern['lie_type'].replace('_', ' ').title()}")
+                print(f"    Evidence: {len(pattern['contradictory_claims'])} contradictory claims")
+        else:
+            print("\nNo deception patterns detected.")
+        
+        print("\n" + "="*60)
 
-    return final
 
-
-# ---------------- Main ----------------
 def main():
+    """Enhanced main function with better error handling"""
     try:
-        sessions = read_sessions()
-    except FileNotFoundError as e:
-        print("[!] No transcripts found:", e)
-        return
-
-    print("[*] Sessions loaded:", len(sessions))
-
-    # Try LLM path first
-    prompt = build_prompt_with_reasoning(sessions, shadow_id="phoenix_2024")
-    print("[*] Sending detailed prompt to LLM (this may take some time)...")
-    raw = None
-
-    parsed_final = None
-
-    if raw:
-        # Save raw already in run_ollama; also keep copy
-        with open(os.path.join(OUTPUT_DIR, "raw_response_full.txt"), "w", encoding="utf-8") as fh:
-            fh.write(raw)
-
-        # attempt to extract JSON
-        candidate = extract_first_json(raw)
-        parsed = try_parse_json_candidate(candidate)
-        if parsed:
-            normalized = normalize_parsed(parsed)
-            if normalized:
-                parsed_final = normalized
-                print("[+] Successfully parsed and normalized LLM JSON output.")
+        # Initialize analyzer
+        analyzer = TruthAnalyzer()
+        
+        # Load sessions
+        sessions = TranscriptProcessor.load_sessions()
+        
+        if not sessions:
+            logger.error("No transcript files found. Please ensure transcript files are in the transcripts/ directory.")
+            logger.info("Expected file patterns:")
+            logger.info("  - session1.txt, session2.txt, ...")
+            logger.info("  - transcript.txt (with session markers)")
+            logger.info("  - Any .txt files")
+            return
+        
+        logger.info(f"Successfully loaded {len(sessions)} session(s)")
+        
+        # Generate analysis report
+        report = analyzer.generate_report(sessions)
+        
+        # Save report
+        output_path = OUTPUT_DIR / f"{SHADOW_ID}.json"
+        ReportGenerator.save_report(report, output_path)
+        
+        # Print summary
+        ReportGenerator.print_summary(report)
+        
+        # Validation check
+        if not _validate_report_schema(report):
+            logger.warning("Generated report may not match expected schema")
         else:
-            # ask the model to extract only JSON from its previous output (follow-up)
-            followup = ("You just produced a reply. Extract and return ONLY the valid JSON object "
-                       "that you included earlier — no explanation, no code fences, only the JSON object.\n\nPrevious output:\n\n") + raw
-            print("[*] Asking LLM to return only the JSON object (follow-up).")
-            raw2 = run_ollama(followup, model=MODEL_NAME, timeout=120)
-            if raw2:
-                with open(os.path.join(OUTPUT_DIR, "raw_response_followup.txt"), "w", encoding="utf-8") as fh:
-                    fh.write(raw2)
-                candidate2 = extract_first_json(raw2)
-                parsed2 = try_parse_json_candidate(candidate2)
-                if parsed2:
-                    norm2 = normalize_parsed(parsed2)
-                    if norm2:
-                        parsed_final = norm2
-                        print("[+] Successfully parsed JSON from follow-up.")
+            logger.info("Report validation passed")
+        
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+        logger.info("Please ensure the transcripts directory exists and contains transcript files")
+    except json.JSONEncodeError as e:
+        logger.error(f"JSON encoding error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error during analysis: {e}")
+        logger.exception("Full traceback:")
 
-    # If LLM path failed, use rule-based fallback
-    if parsed_final is None:
-        print("[!] LLM path failed or produced invalid JSON. Falling back to deterministic rule-based analyzer.")
-        parsed_final = rule_based_analyze(sessions, shadow_id="phoenix_2024")
 
-    # Final safety: ensure JSON strictly follows schema (no extra top-level keys)
-    final_output = {
-        "shadow_id": parsed_final.get("shadow_id", "phoenix_2024"),
-        "revealed_truth": parsed_final.get("revealed_truth", {
-            k: None if k != "skills and other keywords" else [] for k in REVEALED_KEYS
-        }),
-        "deception_patterns": parsed_final.get("deception_patterns", [])
-    }
-
-    # Ensure types: skills is list, deception_patterns list of dicts with required keys
-    if not isinstance(final_output["revealed_truth"].get("skills and other keywords"), list):
-        final_output["revealed_truth"]["skills and other keywords"] = []
-
-    safe_dp = []
-    for d in final_output["deception_patterns"]:
-        if isinstance(d, dict) and "lie_type" in d and "contradictory_claims" in d:
-            claims = d["contradictory_claims"]
-            if isinstance(claims, str):
-                claims = [claims]
-            claims = [str(x) for x in claims if x is not None]
-            safe_dp.append({"lie_type": str(d["lie_type"]), "contradictory_claims": claims})
-    final_output["deception_patterns"] = safe_dp
-
-    # Save final JSON
-    out_path = os.path.join(OUTPUT_DIR, "phoenix_2024.json")
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(final_output, fh, indent=2, ensure_ascii=False)
-
-    print(f"[+] Final JSON written to: {out_path}")
-    # Print a short summary
-    rt = final_output["revealed_truth"]
-    print("Summary:")
-    print(" programming_experience:", rt.get("programming_experience"))
-    print(" programming_language:", rt.get("programming_language"))
-    print(" skill_mastery:", rt.get("skill_mastery"))
-    print(" leadership_claims:", rt.get("leadership_claims"))
-    print(" team_experience:", rt.get("team_experience"))
-    print(" skills:", rt.get("skills and other keywords"))
-    if final_output["deception_patterns"]:
-        print("Detected deception patterns:")
-        for dp in final_output["deception_patterns"]:
-            print(" -", dp["lie_type"], "|", dp["contradictory_claims"])
+def _validate_report_schema(report: Dict[str, Any]) -> bool:
+    """Validate that the report matches the expected schema"""
+    try:
+        # Check required top-level keys
+        required_keys = {"shadow_id", "revealed_truth", "deception_patterns"}
+        if not all(key in report for key in required_keys):
+            return False
+        
+        # Check revealed_truth structure
+        truth = report["revealed_truth"]
+        truth_keys = {
+            "programming_experience", "programming_language", "skill_mastery",
+            "leadership_claims", "team_experience", "skills and other keywords"
+        }
+        if not all(key in truth for key in truth_keys):
+            return False
+        
+        # Check that skills is a list
+        if not isinstance(truth["skills and other keywords"], list):
+            return False
+        
+        # Check deception_patterns structure
+        patterns = report["deception_patterns"]
+        if not isinstance(patterns, list):
+            return False
+        
+        for pattern in patterns:
+            if not isinstance(pattern, dict):
+                return False
+            if not all(key in pattern for key in ["lie_type", "contradictory_claims"]):
+                return False
+            if not isinstance(pattern["contradictory_claims"], list):
+                return False
+        
+        return True
+        
+    except (KeyError, TypeError):
+        return False
 
 
 if __name__ == "__main__":
