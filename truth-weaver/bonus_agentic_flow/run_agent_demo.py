@@ -1,27 +1,29 @@
 import os
 import re
+import json
 from agent_flow import AgenticFlow
 
+# --- Helper: detect signals from transcript ---
 def detect_signals(transcript, session_id):
     signals = []
 
-    # --- Overconfidence / inflated claims ---
+    # Overconfidence markers
     if re.search(r"\b(seasoned|mastered|personally responsible|wrote all)\b", transcript, re.I):
         signals.append("overconfidence")
 
-    # --- Hesitation / vague ---
+    # Hesitation markers
     if re.search(r"\bmaybe\b|\bprobably\b|\bjust\b", transcript, re.I):
         signals.append("hesitation")
 
-    # --- Contradictions between sessions ---
+    # Contradictions across sessions
     if session_id == "session1" and "seasoned" in transcript.lower():
-        signals.append("contradiction")  # later they admit internship
+        signals.append("contradiction")
     if session_id == "session5" and "internship" in transcript.lower():
         signals.append("contradiction")
 
-    # --- Admission of weakness ---
+    # Admissions of weakness
     if re.search(r"\bi just\b|\bnot\b|\bwatched\b", transcript.lower()):
-        signals.append("emotion_sobbing")  # treat as "confession moment"
+        signals.append("emotion_sobbing")
 
     return signals
 
@@ -30,21 +32,41 @@ if __name__ == "__main__":
     transcripts_folder = "../transcripts"
     agent = AgenticFlow()
 
+    timeline = []
+
     for fname in sorted(os.listdir(transcripts_folder)):
         if fname.endswith(".txt"):
             session_id = fname.replace(".txt", "")
-            print(f"\n Processing {fname}")
             with open(os.path.join(transcripts_folder, fname), "r", encoding="utf-8") as f:
                 transcript = f.read().strip()
 
-            print("Transcript:", transcript)
             signals = detect_signals(transcript, session_id)
-            print("Detected signals:", signals)
+            actions = []
 
             for sig in signals:
                 action = agent.handle_signal(sig)
-                print(f" Signal: {sig} | State: {agent.state} | Action: {action}")
+                actions.append({"signal": sig, "state": agent.state, "action": action})
 
-    # Wrap up
+            timeline.append({
+                "session": session_id,
+                "transcript": transcript,
+                "signals": signals,
+                "actions": actions,
+                "final_state": agent.state
+            })
+
+    # Add wrap-up
     final_action = agent.handle_signal("time_up")
-    print(f"\n Interview ended | Action: {final_action}")
+    timeline.append({
+        "session": "wrap_up",
+        "signals": ["time_up"],
+        "actions": [{"signal": "time_up", "state": agent.state, "action": final_action}],
+        "final_state": agent.state,
+        "summary": final_action
+    })
+
+    # Save JSON log
+    with open("agentic_log.json", "w", encoding="utf-8") as f:
+        json.dump(timeline, f, indent=2)
+
+    print("Agentic log saved as agentic_log.json")

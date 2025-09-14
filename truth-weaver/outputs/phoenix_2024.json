@@ -1,49 +1,39 @@
 {
   "shadow_id": "phoenix_2024",
   "revealed_truth": {
-    "programming_experience": "N years",
+    "programming_experience": "0-1 years",
     "programming_language": null,
-    "skill_mastery": "intermediate",
+    "skill_mastery": "advanced",
     "leadership_claims": "uncertain",
     "team_experience": "individual contributor",
     "skills and other keywords": [
-      "kubernetes",
-      "devops"
+      "Kubernetes",
+      "Calico",
+      "Network",
+      "Dns"
     ]
   },
   "deception_patterns": [
     {
-      "lie_type": "fabricated",
+      "lie_type": "experience_inflation",
       "contradictory_claims": [
-        "I'm a DevOps engineer",
+        "I'm a seasoned DevOps engineer",
+        "It was an internship"
+      ]
+    },
+    {
+      "lie_type": "leadership_fabrication",
+      "contradictory_claims": [
+        "I led / was responsible",
+        "The senior engineer handled it"
+      ]
+    },
+    {
+      "lie_type": "self_contradiction",
+      "contradictory_claims": [
+        "I'm a seasoned DevOps engineer",
         "I'm not a DevOps engineer"
-      ],
-      "sessions": [
-        1,
-        5
-      ],
-      "confidence": 0.8
+      ]
     }
-  ],
-  "field_confidence": {
-    "programming_experience": 0.6,
-    "programming_language": 0.0,
-    "skill_mastery": 0.4,
-    "leadership_claims": 0.2,
-    "team_experience": 0.8,
-    "skills and other keywords": 0.9
-  },
-  "evidence": {
-    "programming_experience": [
-      {
-        "session": 1,
-        "claim": "For the past year, I've been in the trenches"
-      },
-      {
-        "session": 5,
-        "claim": "I'm not a DevOps engineer"
-      }
-    ]
-  },
-  "notes": ""
+  ]
 }

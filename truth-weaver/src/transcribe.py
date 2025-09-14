@@ -81,14 +81,23 @@ def transcribe_audio(file_path, session_name):
 
     transcript = enrich_transcript(result, file_path)
 
-    out_file = os.path.join(OUTPUT_DIR, f"{session_name}.txt")
-    with open(out_file, "w", encoding="utf-8") as f:
-        f.write(transcript)
+    # Return transcript instead of writing individual files
+    return f"\n\n=== {session_name.upper()} ===\n{transcript}"
 
-    print(f"[+] Transcript saved: {out_file}")
 
 if __name__ == "__main__":
+    all_transcripts = []
+
     for i, file in enumerate(sorted(os.listdir(INPUT_DIR)), start=1):
         if file.endswith(".wav") or file.endswith(".mp3"):
-            session_name = f"session{i}"
-            transcribe_audio(os.path.join(INPUT_DIR, file), session_name)
+            session_name = f"Session {i}"
+            session_transcript = transcribe_audio(os.path.join(INPUT_DIR, file), session_name)
+            all_transcripts.append(session_transcript)
+
+    # Save combined transcript
+    out_file = os.path.join(OUTPUT_DIR, "transcript.txt")
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(all_transcripts))
+
+    print(f"[+] Final transcript saved: {out_file}")
+

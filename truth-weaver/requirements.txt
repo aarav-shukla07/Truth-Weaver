@@ -1,0 +1,20 @@
+# Core
+python-dotenv
+numpy
+pandas
+scikit-learn
+joblib
+
+# Audio processing
+librosa
+pydub
+soundfile
+noisereduce
+
+# Transcription + NLP
+openai-whisper
+transformers
+torch
+
+# Utilities
+matplotlib

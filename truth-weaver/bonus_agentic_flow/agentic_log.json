@@ -1,0 +1,44 @@
+[
+  {
+    "session": "transcript",
+    "transcript": "=== SESSION 1 ===\nI'm a seasoned DevOps engineer specializing in Kubernetes. For the past year, I've been in the trenches, managing our production clusters, personally responsible for our entire networking and security posture.\n\n\n=== SESSION 2 ===\nWhy Calico? Huh, what else would you use? It's the only serious choice for network policy enforcement at scale. I wrote all our policies from scratch to ensure total service isolation.\n\n\n=== SESSION 3 ===\nI'd check the logs, then maybe the core DNS logs. I'd probably just restart the pod that usually fixes things.\n\n\n=== SESSION 4 ===\nThe senior engineer usually handles the network debugging. I just deploy the YAML files he gives me.\n\n\n=== SESSION 5 ===\nOkay, it was an internship. It was a summer internship, and I mostly just watched the senior engineer's work. I ran some scripts they gave me. I'm not a DevOps engineer. I just want to be one.",
+    "signals": [
+      "overconfidence",
+      "hesitation",
+      "emotion_sobbing"
+    ],
+    "actions": [
+      {
+        "signal": "overconfidence",
+        "state": "deep_probe",
+        "action": "Challenge inflated claim with a harder question"
+      },
+      {
+        "signal": "hesitation",
+        "state": "clarification",
+        "action": "Simplify and redirect question"
+      },
+      {
+        "signal": "emotion_sobbing",
+        "state": "supportive",
+        "action": "Soften tone: reassure before retrying question"
+      }
+    ],
+    "final_state": "supportive"
+  },
+  {
+    "session": "wrap_up",
+    "signals": [
+      "time_up"
+    ],
+    "actions": [
+      {
+        "signal": "time_up",
+        "state": "wrap_up",
+        "action": "Final Interview Summary: Candidate showed emotional stress, needing reassurance."
+      }
+    ],
+    "final_state": "wrap_up",
+    "summary": "Final Interview Summary: Candidate showed emotional stress, needing reassurance."
+  }
+]
