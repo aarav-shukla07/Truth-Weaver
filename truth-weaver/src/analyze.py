@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.absolute()
 TRANSCRIPT_DIR = BASE_DIR.parent / "transcripts"
-OUTPUT_DIR = BASE_DIR.parent / "outputs"
+OUTPUT_DIR = BASE_DIR.parent / "../truth-weaver"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Configuration
