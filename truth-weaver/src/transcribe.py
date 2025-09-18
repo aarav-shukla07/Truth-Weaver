@@ -2,7 +2,6 @@ import os
 import whisper
 from pydub import AudioSegment
 from transformers import pipeline
-import numpy as np
 
 # Input / Output directories
 INPUT_DIR = "data"   # preprocessed audios
@@ -75,29 +74,29 @@ def enrich_transcript(result, audio_file):
     return " ".join(transcript)
 
 # ------------------- Main -------------------
-def transcribe_audio(file_path, session_name):
+def transcribe_audio(file_path, audio_name):
     print(f"[+] Transcribing {file_path} ...")
     result = model.transcribe(file_path, word_timestamps=True)
 
     transcript = enrich_transcript(result, file_path)
 
-    # Return transcript instead of writing individual files
-    return f"\n\n=== {session_name.upper()} ===\n{transcript}"
+    # Use audio file name instead of "Session X"
+    return f"\n\n=== {audio_name} ===\n{transcript}"
 
 
 if __name__ == "__main__":
     all_transcripts = []
 
-    for i, file in enumerate(sorted(os.listdir(INPUT_DIR)), start=1):
+    for file in sorted(os.listdir(INPUT_DIR)):
         if file.endswith(".wav") or file.endswith(".mp3"):
-            session_name = f"Session {i}"
-            session_transcript = transcribe_audio(os.path.join(INPUT_DIR, file), session_name)
+            audio_name = os.path.splitext(file)[0]  # filename without extension
+            file_path = os.path.join(INPUT_DIR, file)
+            session_transcript = transcribe_audio(file_path, audio_name)
             all_transcripts.append(session_transcript)
 
     # Save combined transcript
-    out_file = os.path.join(OUTPUT_DIR, "transcript.txt")
+    out_file = os.path.join(OUTPUT_DIR, "transcribed.txt")
     with open(out_file, "w", encoding="utf-8") as f:
         f.write("\n".join(all_transcripts))
 
     print(f"[+] Final transcript saved: {out_file}")
-
