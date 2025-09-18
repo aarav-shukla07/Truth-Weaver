@@ -11,13 +11,18 @@ Key Improvements:
 - Better logging and debugging capabilities
 - More accurate skill and experience extraction
 - Contextual analysis for better accuracy
-"""
 
+ADDED FEATURE:
+- Lightweight Ollama (llama3.1) fallback: only invoked when deterministic
+  extraction misses important fields (programming_experience, programming_language,
+  skills, etc.). If Ollama is not available or times out, deterministic result is used.
+"""
 import os
 import re
 import json
 import math
 import logging
+import subprocess
 from typing import List, Dict, Tuple, Optional, Any, Set
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
@@ -33,8 +38,13 @@ OUTPUT_DIR = BASE_DIR.parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Configuration
-SHADOW_ID = "phoenix_2024"
+SHADOW_ID = "PrelimsSubmission"
 MAX_SESSIONS = 10
+
+# Ollama / LLM fallback configuration
+OLLAMA_ENABLED = True             # Set to False to disable Ollama fallback
+OLLAMA_MODEL = "llama3.1"         # Local model name to call with `ollama run`
+OLLAMA_TIMEOUT = 90               # seconds for subprocess call
 
 
 @dataclass
@@ -112,76 +122,39 @@ class TranscriptProcessor:
     @staticmethod
     def load_sessions(folder: Path = TRANSCRIPT_DIR, max_sessions: int = MAX_SESSIONS) -> List[str]:
         """
-        Enhanced session loading with better error handling and multiple format support
+        Enhanced session loading with support for audio-filename-based transcript splits.
         """
         if not folder.exists():
             raise FileNotFoundError(f"Transcripts folder not found: {folder}")
-        
+
         logger.info(f"Loading sessions from {folder}")
-        
-        # Try explicit session files first
-        session_files = []
-        for pattern in ["session*.txt", "sess*.txt", "part*.txt", "interview*.txt"]:
-            session_files.extend(folder.glob(pattern))
-        
-        if session_files:
-            # Sort by extracted number
-            def extract_number(filename: str) -> int:
-                match = re.search(r'(\d+)', filename)
-                return int(match.group(1)) if match else 0
-            
-            session_files.sort(key=lambda p: extract_number(p.name))
-            
-            sessions = []
-            for file_path in session_files[:max_sessions]:
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read().strip()
-                        if content:
-                            sessions.append(content)
-                            logger.info(f"Loaded session from {file_path.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to load {file_path}: {e}")
-            
-            if sessions:
-                return sessions
-        
-        # Try single transcript file with session markers
-        for filename in ["transcript.txt", "transcripts.txt", "merged.txt"]:
-            file_path = folder / filename
-            if file_path.exists():
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    # Try various session separators
-                    patterns = [
-                        r"={3,}\s*Session\s*\d+\s*={3,}",
-                        r"Session\s*\d+\s*:",
-                        r"---+\s*Session\s*\d+\s*---+",
-                        r"\[Session\s*\d+\]"
-                    ]
-                    
-                    for pattern in patterns:
-                        parts = re.split(pattern, content, flags=re.IGNORECASE)
-                        parts = [p.strip() for p in parts if p.strip()]
-                        if len(parts) > 1:
-                            logger.info(f"Split transcript into {len(parts)} sessions using pattern: {pattern}")
-                            return parts[:max_sessions]
-                    
-                    # Fallback: split by double newlines
-                    blocks = [b.strip() for b in re.split(r'\n\s*\n+', content) if b.strip()]
-                    if len(blocks) > 1:
-                        logger.info(f"Split transcript into {len(blocks)} blocks")
-                        return blocks[:max_sessions]
-                    
-                    # Single session
-                    return [content] if content.strip() else []
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to process {filename}: {e}")
-        
-        # Last resort: all txt files
+
+        # Prioritize our combined transcribed.txt
+        file_path = folder / "transcribed.txt"
+        if file_path.exists():
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # Split by audio filename markers: === FILENAME ===
+                parts = re.split(r"={3,}\s*([^\n=]+)\s*={3,}", content)
+                # re.split keeps delimiters in the result. We want pairs (filename, transcript)
+                sessions = []
+                for i in range(1, len(parts), 2):
+                    filename = parts[i].strip()
+                    transcript = parts[i+1].strip()
+                    if transcript:
+                        # store with filename marker at start for identification
+                        sessions.append(f"[{filename}] {transcript}")
+
+                if sessions:
+                    logger.info(f"Split transcript into {len(sessions)} sessions (by filenames)")
+                    return sessions[:max_sessions]
+
+            except Exception as e:
+                logger.warning(f"Failed to process transcribed.txt: {e}")
+
+        # fallback to old handling (in case someone provides session1.txt etc.)
         txt_files = list(folder.glob("*.txt"))
         if txt_files:
             sessions = []
@@ -189,12 +162,12 @@ class TranscriptProcessor:
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read().strip()
-                        if content:
-                            sessions.append(content)
+                    if content:
+                        sessions.append(content)
                 except Exception as e:
                     logger.warning(f"Failed to load {file_path}: {e}")
             return sessions
-        
+
         logger.warning("No transcript files found")
         return []
 
@@ -586,6 +559,105 @@ class TruthAnalyzer:
         self.skill_extractor = SkillExtractor(self.processor)
         self.deception_detector = DeceptionDetector()
     
+    # ---------- LLM / Ollama fallback helpers ----------
+    @staticmethod
+    def _extract_json_balanced(text: str) -> Optional[str]:
+        """
+        Extract the first balanced {...} JSON substring from a blob of text.
+        Handles quoted strings and escapes.
+        """
+        if not text:
+            return None
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == '"' and not escape:
+                in_str = not in_str
+            if ch == "\\" and not escape:
+                escape = True
+                continue
+            else:
+                escape = False
+            if not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+        return None
+
+    def _ask_ollama_fill(self, sessions: List[str], missing_fields: List[str]) -> Dict[str, Any]:
+        """
+        Ask local Ollama (llama3.1) to fill missing fields.
+        Returns parsed JSON dict with keys matching missing_fields (if available).
+        Robust to timeouts/errors: returns {} on failure.
+        """
+        if not OLLAMA_ENABLED:
+            logger.info("[+] Ollama fallback disabled by configuration.")
+            return {}
+
+        # Build compact prompt that asks to return only a JSON object with the missing keys.
+        missing_json_schema = {k: "null" for k in missing_fields}
+        prompt = (
+            "You are an assistant that extracts interview metadata. "
+            "Return ONLY one valid JSON object (no explanation) containing these keys exactly:\n"
+            f"{json.dumps(list(missing_fields))}\n\n"
+            "Use the transcripts below. Be conservative: if unsure, return null or empty list.\n\n"
+            "Transcripts:\n"
+        )
+        for i, s in enumerate(sessions, start=1):
+            snippet = s.strip().replace("\n", " ")[:1000]
+            prompt += f"\nSession {i}: {snippet}"
+
+        prompt += (
+            "\n\nOutput JSON should only include the requested keys and basic primitive values "
+            "(strings or lists). Example: {\"programming_experience\":\"3-4 years\",\"skills and other keywords\":[\"Kubernetes\"]}"
+        )
+
+        try:
+            logger.info("[*] Calling Ollama for missing fields...")
+            proc = subprocess.run(
+                ["ollama", "run", OLLAMA_MODEL],
+                input=prompt.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=OLLAMA_TIMEOUT
+            )
+            stdout = proc.stdout.decode("utf-8", errors="ignore")
+            stderr = proc.stderr.decode("utf-8", errors="ignore")
+            if stderr:
+                logger.debug(f"Ollama stderr: {stderr[:1000]}")
+            candidate = self._extract_json_balanced(stdout)
+            if not candidate:
+                # try fallback: maybe the model printed JSON-like lines
+                candidate = self._extract_json_balanced(stderr)
+            if not candidate:
+                logger.warning("[!] Ollama did not return a JSON object (or parsing failed).")
+                return {}
+            try:
+                parsed = json.loads(candidate)
+                logger.info("[+] Ollama returned JSON; merging results for missing fields.")
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception as e:
+                logger.warning(f"[!] Failed to parse JSON from Ollama output: {e}")
+                return {}
+        except subprocess.TimeoutExpired:
+            logger.warning("[!] Ollama call timed out.")
+            return {}
+        except FileNotFoundError:
+            logger.warning("[!] Ollama CLI not found (ensure `ollama` is installed and on PATH).")
+            return {}
+        except Exception as e:
+            logger.warning(f"[!] Ollama call failed: {e}")
+            return {}
+
+    # ---------- analysis pipeline ----------
     def analyze_sessions(self, sessions: List[str]) -> List[SessionAnalysis]:
         """Analyze all sessions and return structured results"""
         analyses = []
@@ -647,7 +719,11 @@ class TruthAnalyzer:
             return "beginner"
         else:
             # Default to intermediate if skills are mentioned but no explicit level
-            return "intermediate"
+            # If no skills at all, leave None to allow Ollama fallback
+            langs, skills = self.skill_extractor.extract_languages_and_skills(text)
+            if skills:
+                return "intermediate"
+            return None
     
     def _detect_leadership_indicators(self, text: str) -> List[str]:
         """Detect leadership indicators in text"""
@@ -725,8 +801,11 @@ class TruthAnalyzer:
         
         return max(0.0, score)
     
-    def synthesize_results(self, analyses: List[SessionAnalysis]) -> Dict[str, Any]:
-        """Synthesize final results from all session analyses"""
+    def synthesize_results(self, analyses: List[SessionAnalysis], sessions: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Synthesize final results from all session analyses
+
+        NOTE: accepts `sessions` (raw text list) so that Ollama fallback can use them when needed.
+        """
         
         # Aggregate experience
         all_experience_claims = []
@@ -762,8 +841,9 @@ class TruthAnalyzer:
         
         # Detect deception patterns
         deception_patterns = self.deception_detector.detect_deception_patterns(analyses)
-        
-        return {
+
+        # Build results dict (internal keys)
+        results = {
             "programming_experience": programming_experience,
             "programming_language": programming_language,
             "skill_mastery": skill_mastery,
@@ -772,6 +852,59 @@ class TruthAnalyzer:
             "skills_and_keywords": unique_skills,
             "deception_patterns": deception_patterns
         }
+
+        # ------------------ Ollama fallback (only if missing important fields) ------------------
+        # Determine which fields are missing or low-confidence
+        missing = []
+        # consider "programming_experience", "programming_language", "skills_and_keywords", "skill_mastery"
+        if results["programming_experience"] in (None, ""):
+            missing.append("programming_experience")
+        if results["programming_language"] in (None, "", []):
+            missing.append("programming_language")
+        if not results["skills_and_keywords"]:
+            missing.append("skills and other keywords")  # use final schema name so Ollama returns correct key
+        if results["skill_mastery"] in (None, "", "unclear"):
+            missing.append("skill_mastery")
+
+        if missing and sessions:
+            # ask Ollama to fill only missing fields
+            ai_response = self._ask_ollama_fill(sessions, missing)
+            if isinstance(ai_response, dict) and ai_response:
+                # Map AI keys into our internal results keys
+                # Accept multiple possible key forms
+                for k in missing:
+                    # direct key
+                    if k in ai_response and ai_response[k]:
+                        val = ai_response[k]
+                    # maybe AI returns "skills_and_keywords" or "skills"
+                    elif k == "skills and other keywords" and ("skills_and_keywords" in ai_response or "skills" in ai_response):
+                        val = ai_response.get("skills_and_keywords") or ai_response.get("skills")
+                    else:
+                        val = ai_response.get(k) if isinstance(k, str) else None
+
+                    # Normalize and set if meaningful
+                    if val:
+                        if k in ("skills and other keywords", "skills_and_keywords", "skills"):
+                            # ensure list
+                            if isinstance(val, str):
+                                # try comma-separated
+                                parts = [s.strip() for s in re.split(r",|\n|;", val) if s.strip()]
+                                results["skills_and_keywords"] = parts
+                            elif isinstance(val, list):
+                                results["skills_and_keywords"] = val
+                        else:
+                            # simple assignment for strings
+                            if isinstance(val, list):
+                                # pick first element if list was returned
+                                results[k] = val[0] if val else results.get(k)
+                            else:
+                                results[k] = val
+
+        # Final normalization for schema users expect
+        if not isinstance(results["skills_and_keywords"], list):
+            results["skills_and_keywords"] = list(results["skills_and_keywords"]) if results["skills_and_keywords"] else []
+
+        return results
     
     def _determine_programming_experience(self, claims: List[ExperienceClaim]) -> Optional[str]:
         """Determine programming experience from all claims"""
@@ -804,9 +937,9 @@ class TruthAnalyzer:
         elif avg_experience < 2.0:
             return "1-2 years"
         elif avg_experience < 5.0:
-            return f"{int(avg_experience)} years"
+            return f"{int(round(avg_experience))} years"
         else:
-            return f"{int(avg_experience)}+ years"
+            return f"{int(round(avg_experience))}+ years"
     
     def _determine_leadership_claims(self, analyses: List[SessionAnalysis]) -> str:
         """Determine the nature of leadership claims"""
@@ -856,21 +989,21 @@ class TruthAnalyzer:
         # Analyze all sessions
         session_analyses = self.analyze_sessions(sessions)
         
-        # Synthesize results
-        results = self.synthesize_results(session_analyses)
+        # Synthesize results (pass original sessions for LLM fallback)
+        results = self.synthesize_results(session_analyses, sessions)
         
         # Format for required schema
         final_report = {
             "shadow_id": SHADOW_ID,
             "revealed_truth": {
-                "programming_experience": results["programming_experience"],
-                "programming_language": results["programming_language"],
-                "skill_mastery": results["skill_mastery"],
-                "leadership_claims": results["leadership_claims"],
-                "team_experience": results["team_experience"],
-                "skills and other keywords": results["skills_and_keywords"]
+                "programming_experience": results.get("programming_experience"),
+                "programming_language": (results.get("programming_language") or None),
+                "skill_mastery": results.get("skill_mastery"),
+                "leadership_claims": results.get("leadership_claims"),
+                "team_experience": results.get("team_experience"),
+                "skills and other keywords": results.get("skills_and_keywords", [])
             },
-            "deception_patterns": results["deception_patterns"]
+            "deception_patterns": results.get("deception_patterns", [])
         }
         
         # Log summary
