@@ -5,7 +5,7 @@ from transformers import pipeline
 
 # Input / Output directories
 INPUT_DIR = "data"   # preprocessed audios
-OUTPUT_DIR = "transcripts"
+OUTPUT_DIR = "../truth-weaver"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Load Whisper
