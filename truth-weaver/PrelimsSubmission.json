@@ -1,0 +1,31 @@
+{
+  "shadow_id": "PrelimsSubmission",
+  "revealed_truth": {
+    "programming_experience": "6+ years",
+    "programming_language": null,
+    "skill_mastery": "advanced",
+    "leadership_claims": "fabricated",
+    "team_experience": "mixed",
+    "skills and other keywords": [
+      "Architecture"
+    ]
+  },
+  "deception_patterns": [
+    {
+      "lie_type": "experience_inconsistency",
+      "contradictory_claims": [
+        "Session 1: architect",
+        "Session 5: intern",
+        "Session 5: internship"
+      ]
+    },
+    {
+      "lie_type": "team_experience_contradiction",
+      "contradictory_claims": [
+        "Session 4: Team collaboration mentioned",
+        "Session 5: Team collaboration mentioned",
+        "Session 1: Individual work mentioned"
+      ]
+    }
+  ]
+}
